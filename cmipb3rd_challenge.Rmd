@@ -1,0 +1,523 @@
+---
+title: "Monocytes"
+output: html_document
+date: "2024-11-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(glmnet)
+library(caret) 
+```
+
+#Gene Expression Task
+```{r}
+cmipb<-readRDS("~/Downloads/master_allData_batchCorrected.RDS")
+cmipbrna<-cmipb$pbmc_gene_expression
+rna_subject<-subject[subject$specimen_id %in% colnames(cmipbcorrect), ]
+cmipbcorrect<-as.data.frame(cmipbrna$tpm$batchCorrected_data)
+subject<-cmipb$subject_specimen
+train_list<-c('2020_dataset','2021_dataset','2022_dataset')
+predict_list<-c('2023_dataset')
+```
+
+```{r}
+data2020<-rna_subject[rna_subject$dataset=='2020_dataset',]
+data2021<-rna_subject[rna_subject$dataset=='2021_dataset',]
+data2022<-rna_subject[rna_subject$dataset=='2022_dataset',]
+
+```
+
+
+```{r}
+day0_train<-rna_subject[rna_subject$timepoint==0&rna_subject$dataset %in% train_list,]
+day3_train<-rna_subject[rna_subject$timepoint==3,]
+predict<-rna_subject[rna_subject$dataset %in% predict_list,]
+predict_0<-predict[predict$timepoint==0,]
+```
+
+```{r}
+selected_day0 <- as.character(day0_train$specimen_id)
+selected_day3 <- as.character(day3_train$specimen_id)
+selected_predict <- as.character(predict$specimen_id)
+selected_predict_0 <- as.character(predict_0$specimen_id)
+
+# Subset the dataframe by column names using base R
+day0_rna <- cmipbcorrect[, selected_day0]
+day3_rna <- cmipbcorrect[, selected_day3]
+predict_rna<- cmipbcorrect[, selected_predict]
+predict_rna_0<- cmipbcorrect[, selected_predict_0]
+
+```
+
+
+#prediction model
+```{r}
+# Transpose dataframes to make genes columns and subjects rows
+day0_df<-data.frame(t(day0_rna))
+day3_df<-data.frame(t(day3_rna))
+rnafc_df<-day3_df/(day0_df+0.001)
+
+
+# Convert Day 0 and Day 3 dataframes to matrices
+X <- as.matrix(day0_df)  # Predictor matrix (Day 0)
+Y <- as.matrix(day3_df)  # Response matrix (Day 3)
+Y <- as.matrix(rnafc_df)  # Response matrix (Day 3)
+
+# Initialize a list to store models for each gene
+lasso_models <- list()
+lasso_results <- data.frame(Gene = colnames(Y), R_squared = NA)
+
+# Loop over each gene (column) in Day 3
+# Initialize a list to store models and selected features for each gene
+selected_features <- list()
+final_models <- list()
+lasso_results <- data.frame(Gene = colnames(Y), R_squared = NA, Selected_Features = NA)
+
+custom_lambda <- 10^seq(-4, -0.5, length = 100)
+custom_lambda <- 10^seq(-6, -2, length = 50)
+
+# Loop over each gene (column) in Day 3
+for (i in seq_len(ncol(Y))) {
+    # Define the response variable (Day 3 expression for the ith gene)
+    y <- Y[, i]
+    
+    # Ensure there’s enough variance in the response to fit the model
+    if (var(y) > 0) {
+        # Step 1: Perform Lasso regression with cross-validation for feature selection
+        cv_fit <- cv.glmnet(X, y, alpha = 1, standardize = TRUE, nfolds = 5,lambda =custom_lambda)
+        
+        # Identify the best lambda (regularization parameter)
+        best_lambda <- cv_fit$lambda.min
+        
+        # Extract selected features (non-zero coefficients) at the best lambda
+        selected_coefs <- coef(cv_fit, s = best_lambda)
+        selected_genes <- rownames(selected_coefs)[selected_coefs[, 1] != 0]
+        selected_genes <- selected_genes[selected_genes != "(Intercept)"]  # Remove the intercept
+
+        # Store the selected features for this gene
+        selected_features[[colnames(Y)[i]]] <- selected_genes
+        
+        
+        # Step 2: Fit the final model using only selected features
+        if (length(selected_genes) > 0) {
+            X_selected <- X[, selected_genes, drop = FALSE]  # Use only selected features
+            final_model <- glmnet(X_selected, y, alpha = 1, lambda = best_lambda)
+            final_models[[colnames(Y)[i]]] <- final_model
+
+            # Calculate R-squared for the model
+            mse <- min(cv_fit$cvm)  # Mean squared error at best lambda
+            r_squared <- 1 - mse / var(y)  # R-squared
+            lasso_results$R_squared[i] <- r_squared
+            lasso_results$Selected_Features[i] <- paste(selected_genes, collapse = ", ")
+        } else {
+            # If no features were selected, mark as NA
+            lasso_results$R_squared[i] <- NA
+            lasso_results$Selected_Features[i] <- "None"
+        }
+    }
+}
+
+```
+
+```{r}
+predict_ccl3<-data.frame(t(predict_rna_0))
+X_new <- as.matrix(predict_ccl3)
+predictions <- data.frame(matrix(nrow = nrow(X_new), ncol = ncol(Y)))
+colnames(predictions) <- colnames(Y)
+
+X_new_selected <- X_new[, selected_features$ENSG00000277632.1, drop = FALSE]  # Use selected features
+predictions <- predict(final_models[['ENSG00000277632.1']], newx = X_new_selected, s = best_lambda)
+
+predictions<-data.frame(predictions)
+predictions$rank <- rank(-predictions$s1, ties.method = "first")
+
+write.csv(predictions,"~/Desktop/cmipb_project/prediction/Lasso_Task3_FC_prediction.csv")
+
+
+```
+
+
+#Antibody Task
+
+```{r}
+cmipb<-readRDS("~/Downloads/master_allData_batchCorrected.RDS")
+cmipb$subject_specimen
+cmipbab<-cmipb$plasma_ab_titer
+subject<-cmipb$subject_specimen
+cmipbab<-as.data.frame(cmipbab$batchCorrected_data)
+ab_subject<-subject[subject$specimen_id %in% colnames(cmipbab), ]
+train_list<-c('2020_dataset','2021_dataset','2022_dataset')
+predict_list<-c('2023_dataset')
+wPsubj<-ab_subject[ab_subject$infancy_vac=='wP',]
+aPsubj<-ab_subject[ab_subject$infancy_vac=='aP',]
+```
+
+```{r}
+data2020<-ab_subject[ab_subject$dataset=='2020_dataset',]
+data2021<-ab_subject[ab_subject$dataset=='2021_dataset',]
+data2022<-ab_subject[ab_subject$dataset=='2022_dataset',]
+data2023<-ab_subject[ab_subject$dataset=='2023_dataset',]
+
+#wP
+data2020<-wPsubj[wPsubj$dataset=='2020_dataset',]
+data2021<-wPsubj[wPsubj$dataset=='2021_dataset',]
+data2022<-wPsubj[wPsubj$dataset=='2022_dataset',]
+
+#aP
+data2020<-aPsubj[aPsubj$dataset=='2020_dataset',]
+data2021<-aPsubj[aPsubj$dataset=='2021_dataset',]
+data2022<-aPsubj[aPsubj$dataset=='2022_dataset',]
+
+```
+
+```{r}
+abday0_train<-ab_subject[ab_subject$timepoint==0&ab_subject$dataset %in% train_list,]
+abday14_train<-ab_subject[ab_subject$timepoint==14,]
+predict<-ab_subject[ab_subject$dataset %in% predict_list,]
+predict_0<-predict[predict$timepoint==0,]
+
+#wP
+abday0_train<-wPsubj[wPsubj$timepoint==0&wPsubj$dataset %in% train_list,]
+abday14_train<-wPsubj[wPsubj$timepoint==14,]
+predict<-wPsubj[wPsubj$dataset %in% predict_list,]
+predict_0<-predict[predict$timepoint==0,]
+
+#aP
+abday0_train<-aPsubj[aPsubj$timepoint==0&aPsubj$dataset %in% train_list,]
+abday14_train<-aPsubj[aPsubj$timepoint==14,]
+predict<-aPsubj[aPsubj$dataset %in% predict_list,]
+predict_0<-predict[predict$timepoint==0,]
+```
+
+```{r}
+selected_day0 <- as.character(abday0_train$specimen_id)
+selected_day14 <- as.character(abday14_train$specimen_id)
+
+selected_predict <- as.character(predict$specimen_id)
+selected_predict_0 <- as.character(predict_0$specimen_id)
+
+# Subset the dataframe by column names using base R
+day0_ab <- cmipbab[, selected_day0]
+day14_ab <- cmipbab[, selected_day14]
+predict_ab<-cmipbab[, selected_predict_0]
+```
+
+#prediction model
+```{r}
+# Transpose dataframes to make genes columns and subjects rows
+day0ab_df<-data.frame(t(day0_ab))
+day14ab_df<-data.frame(t(day14_ab))
+abfc_df<-day14ab_df/day0ab_df
+
+
+day0ab_df <- day0ab_df[rownames(day0ab_df)!='288', ]
+
+# Convert Day 0 and Day 3 dataframes to matrices
+X <- as.matrix(day0ab_df)  # Predictor matrix (Day 0)
+Y <- as.matrix(day14ab_df)  # Response matrix (Day 14)
+Y <- as.matrix(abfc_df)
+
+
+# Initialize a list to store models for each gene
+lasso_models <- list()
+lasso_results <- data.frame(Gene = colnames(Y), R_squared = NA)
+
+# Loop over each gene (column) in Day 3
+# Initialize a list to store models and selected features for each gene
+selected_features <- list()
+final_models <- list()
+lasso_results <- data.frame(Gene = colnames(Y), R_squared = NA, Selected_Features = NA)
+
+#custom_lambda <- 10^seq(-4, -0.5, length = 100)
+custom_lambda <- 10^seq(-6, -2, length = 100)
+
+# Loop over columns in Day 14
+for (i in seq_len(ncol(Y))) {
+    # Define the response variable (Day 3 expression for the ith gene)
+    y <- Y[, i]
+    
+    # Ensure there’s enough variance in the response to fit the model
+    if (var(y) > 0) {
+        # Step 1: Perform Lasso regression with cross-validation for feature selection
+        cv_fit <- cv.glmnet(X, y, alpha = 1, standardize = TRUE, nfolds = 5,lambda =custom_lambda)
+        
+        # Identify the best lambda (regularization parameter)
+        best_lambda <- cv_fit$lambda.min
+        
+        # Extract selected features (non-zero coefficients) at the best lambda
+        selected_coefs <- coef(cv_fit, s = best_lambda)
+        selected_genes <- rownames(selected_coefs)[selected_coefs[, 1] != 0]
+        selected_genes <- selected_genes[selected_genes != "(Intercept)"]  # Remove the intercept
+
+        # Store the selected features for this gene
+        selected_features[[colnames(Y)[i]]] <- selected_genes
+        
+        
+        # Step 2: Fit the final model using only selected features
+        if (length(selected_genes) > 0) {
+            X_selected <- X[, selected_genes, drop = FALSE]  # Use only selected features
+            final_model <- glmnet(X_selected, y, alpha = 1, lambda = best_lambda)
+            final_models[[colnames(Y)[i]]] <- final_model
+
+            # Calculate R-squared for the model
+            mse <- min(cv_fit$cvm)  # Mean squared error at best lambda
+            r_squared <- 1 - mse / var(y)  # R-squared
+            lasso_results$R_squared[i] <- r_squared
+            lasso_results$Selected_Features[i] <- paste(selected_genes, collapse = ", ")
+        } else {
+            # If no features were selected, mark as NA
+            lasso_results$R_squared[i] <- NA
+            lasso_results$Selected_Features[i] <- "None"
+        }
+    }
+}
+
+
+```
+
+```{r}
+
+# Print R-squared values for each gene
+print(lasso_results)
+
+# To use a model for prediction:
+# Example: Predict Day 14 IgG PT using Day 0 data
+X_new <- X[, selected_features[[colnames(Y)[1]]], drop = FALSE]
+X_new <- X[, selected_features[['IgG_PT']], drop = FALSE]
+predictions <- predict(final_models[[colnames(Y)[1]]], newx = X_new)
+predictions <- predict(final_models[['IgG_PT']], newx = X_new)
+
+rss <- sum((y - predictions)^2)  # Residual sum of squares
+tss <- sum((y - mean(y))^2) # Total sum of squares
+r_squared <- 1 - (rss/tss)
+
+print(predictions)
+cor(day14ab_df$IgG_PT,predictions)
+
+best_lambda <- cv_fit$lambda.min
+coefficients <- coef(cv_fit, s = best_lambda)
+selected <- coefficients[coefficients != 0, ]
+plot(cv_fit, xvar = "lambda", label = TRUE)
+
+
+plot(day14ab_df$IgG_PT, predictions, 
+     main = "Prediction vs. Actual Values", 
+     xlab = "Actual Values", 
+     ylab = "Predicted Values", 
+     pch = 16, col = "blue")
+abline(0, 1, col = "red", lty = 2) 
+
+lambda_values <- cv_fit$lambda
+mse_values <- cv_fit$cvm  # Mean squared error for each lambda
+
+# Calculate R-squared for each lambda
+r_squared_values <- 1 - mse_values / var(y)
+
+plot(
+  log(lambda_values), r_squared_values,
+  type = "b",  # Line with points
+  xlab = "Log(Lambda)",
+  ylab = "R-squared",
+  main = "Lasso Regression Cross-Validation Performance"
+)
+abline(v = log(lasso_cv$lambda.min), col = "red", lty = 2)  # Optimal lambda
+#legend("bottomright", legend = "Optimal Lambda", col = "red", lty = 2)
+
+```
+
+```{r}
+predict_ab<-data.frame(t(predict_ab))
+X_new <- as.matrix(predict_ab)
+predictions <- data.frame(matrix(nrow = nrow(X_new), ncol = ncol(Y)))
+colnames(predictions) <- colnames(Y)
+
+X_new_selected <- X_new[, selected_features$IgG_PT, drop = FALSE]  # Use selected features
+predictions <- predict(final_models[['IgG_PT']], newx = X_new_selected, s = best_lambda)
+
+predictions<-data.frame(predictions)
+predictions$rank <- rank(-predictions$s1, ties.method = "first")
+
+write.csv(predictions,"~/Desktop/cmipb_project/prediction/Lasso_Task1_FC_prediction.csv")
+
+
+```
+
+
+
+#Monocyte Task
+```{r}
+cmipb<-readRDS("~/Downloads/master_allData_batchCorrected.RDS")
+cmipbmcy<-cmipb$pbmc_cell_frequency
+subject<-cmipb$subject_specimen
+cmipbmcy<-as.data.frame(cmipbmcy$batchCorrected_data)
+mcy_subject<-subject[subject$specimen_id %in% colnames(cmipbmcy), ]
+train_list<-c('2020_dataset','2021_dataset','2022_dataset')
+predict_list<-c('2023_dataset')
+```
+
+```{r}
+data2020<-mcy_subject[mcy_subject$dataset=='2020_dataset',]
+data2021<-mcy_subject[mcy_subject$dataset=='2021_dataset',]
+data2022<-mcy_subject[mcy_subject$dataset=='2022_dataset',]
+
+```
+
+```{r}
+mcyday0_train<-mcy_subject[mcy_subject$timepoint==0&mcy_subject$dataset %in% train_list,]
+mcyday1_train<-mcy_subject[mcy_subject$timepoint==1&mcy_subject$dataset %in% train_list,]
+predict<-mcy_subject[mcy_subject$dataset %in% predict_list,]
+predict_0<-predict[predict$timepoint==0,]
+```
+
+```{r}
+selected_day0 <- as.character(mcyday0_train$specimen_id)
+selected_day1 <- as.character(mcyday1_train$specimen_id)
+
+selected_predict <- as.character(predict$specimen_id)
+selected_predict_0 <- as.character(predict_0$specimen_id)
+
+# Subset the dataframe by column names using base R
+day0_mcy <- cmipbmcy[, selected_day0]
+day1_mcy <- cmipbmcy[, selected_day1]
+predict_mcy<-cmipbmcy[, selected_predict_0]
+```
+
+#prediction model
+```{r}
+# Transpose dataframes to make genes columns and subjects rows
+day0mcy_df<-data.frame(t(day0_mcy))
+day1mcy_df<-data.frame(t(day1_mcy))
+mcyfc_df<-day1mcy_df/day0mcy_df
+write.csv(day1mcy_df,"~/Desktop/cmipb_project/data/day1mcy_df.csv")
+
+# Convert Day 0 and Day 3 dataframes to matrices
+X <- as.matrix(day0mcy_df)  # Predictor matrix (Day 0)
+Y <- as.matrix(day1mcy_df)  # Response matrix (Day 1)
+Y <- as.matrix(mcyfc_df) 
+
+
+# Initialize a list to store models for each gene
+lasso_models <- list()
+lasso_results <- data.frame(Gene = colnames(Y), R_squared = NA)
+
+# Loop over each gene (column) in Day 3
+# Initialize a list to store models and selected features for each gene
+selected_features <- list()
+final_models <- list()
+lasso_results <- data.frame(Gene = colnames(Y), R_squared = NA, Selected_Features = NA)
+
+#custom_lambda <- 10^seq(-4, -0.5, length = 100)
+custom_lambda <- 10^seq(-6, -2, length = 100)
+
+# Loop over columns in Day 14
+for (i in seq_len(ncol(Y))) {
+    # Define the response variable (Day 3 expression for the ith gene)
+    y <- Y[, i]
+    
+    # Ensure there’s enough variance in the response to fit the model
+    if (var(y) > 0) {
+        # Step 1: Perform Lasso regression with cross-validation for feature selection
+        cv_fit <- cv.glmnet(X, y, alpha = 1, standardize = TRUE, nfolds = 5,lambda =custom_lambda)
+        
+        # Identify the best lambda (regularization parameter)
+        best_lambda <- cv_fit$lambda.min
+        
+        # Extract selected features (non-zero coefficients) at the best lambda
+        selected_coefs <- coef(cv_fit, s = best_lambda)
+        selected_genes <- rownames(selected_coefs)[selected_coefs[, 1] != 0]
+        selected_genes <- selected_genes[selected_genes != "(Intercept)"]  # Remove the intercept
+
+        # Store the selected features for this gene
+        selected_features[[colnames(Y)[i]]] <- selected_genes
+        
+        
+        # Step 2: Fit the final model using only selected features
+        if (length(selected_genes) > 0) {
+            X_selected <- X[, selected_genes, drop = FALSE]  # Use only selected features
+            final_model <- glmnet(X_selected, y, alpha = 1, lambda = best_lambda)
+            final_models[[colnames(Y)[i]]] <- final_model
+
+            # Calculate R-squared for the model
+            mse <- min(cv_fit$cvm)  # Mean squared error at best lambda
+            r_squared <- 1 - mse / var(y)  # R-squared
+            lasso_results$R_squared[i] <- r_squared
+            lasso_results$Selected_Features[i] <- paste(selected_genes, collapse = ", ")
+        } else {
+            # If no features were selected, mark as NA
+            lasso_results$R_squared[i] <- NA
+            lasso_results$Selected_Features[i] <- "None"
+        }
+    }
+}
+
+
+```
+
+```{r}
+
+# Print R-squared values for each gene
+print(lasso_results)
+
+
+# To use a model for prediction:
+# Example: Predict Day 14 IGG PT using Day 0 data
+X_new <- X[, selected_features[[colnames(Y)[1]]], drop = FALSE]
+X_new <- X[, selected_features[['Monocytes']], drop = FALSE]
+predictions <- predict(final_models[[colnames(Y)[1]]], newx = X_new)
+predictions <- predict(final_models[['Monocytes']], newx = X_new)
+
+rss <- sum((y - predictions)^2)  # Residual sum of squares
+tss <- sum((y - mean(y))^2) # Total sum of squares
+r_squared <- 1 - (rss/tss)
+
+print(predictions)
+cor(day1mcy_df$Monocytes,predictions)
+
+best_lambda <- cv_fit$lambda.min
+coefficients <- coef(cv_fit, s = best_lambda)
+selected <- coefficients[coefficients != 0, ]
+plot(cv_fit, xvar = "lambda", label = TRUE)
+
+
+plot(day1mcy_df$Monocytes, predictions, 
+     main = "Prediction vs. Actual Values", 
+     xlab = "Actual Values", 
+     ylab = "Predicted Values", 
+     pch = 16, col = "blue")
+abline(0, 1, col = "red", lty = 2) 
+
+lambda_values <- cv_fit$lambda
+mse_values <- cv_fit$cvm  # Mean squared error for each lambda
+
+# Calculate R-squared for each lambda
+r_squared_values <- 1 - mse_values / var(y)
+
+plot(
+  log(lambda_values), r_squared_values,
+  type = "b",  # Line with points
+  xlab = "Log(Lambda)",
+  ylab = "R-squared",
+  main = "Lasso Regression Cross-Validation Performance"
+)
+abline(v = log(lasso_cv$lambda.min), col = "red", lty = 2)  # Optimal lambda
+#legend("bottomright", legend = "Optimal Lambda", col = "red", lty = 2)
+
+```
+
+```{r}
+predict_mcy<-data.frame(t(predict_mcy))
+X_new <- as.matrix(predict_mcy)
+predictions <- data.frame(matrix(nrow = nrow(X_new), ncol = ncol(Y)))
+colnames(predictions) <- colnames(Y)
+
+X_new_selected <- X_new[, selected_features$Monocytes, drop = FALSE]  # Use selected features
+predictions <- predict(final_models[['Monocytes']], newx = X_new_selected, s = best_lambda)
+
+predictions<-data.frame(predictions)
+predictions$rank <- rank(-predictions$s1, ties.method = "first")
+
+write.csv(predictions,"~/Desktop/cmipb_project/prediction/Lasso_Task2_FC_prediction.csv")
+
+
+```
