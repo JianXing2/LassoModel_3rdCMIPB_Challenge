@@ -1,0 +1,3 @@
+# LassoModel_3rdCMIPB_Challenge
+
+This repository contains code for building predictive models on batch-corrected and harmonized data provided by the CMI-PB team. For each task, we construct prediction models using a general linear model with Lasso regularization, leveraging the glmnet library. The feature scores serve as input data, and task-specific values are used as response variables to generate separate predictive models for each task.
